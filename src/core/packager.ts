@@ -8,6 +8,7 @@ import {
   createIgnoreFilter as defaultCreateIgnoreFilter,
   IgnoreFilter,
 } from '../utils/ignoreUtils.js';
+import { getAllIncludePatterns, createIncludeFilter, IncludeFilter } from '../utils/includeUtils.js';
 import { generateOutput as defaultGenerateOutput } from './outputGenerator.js';
 import { checkFileWithSecretLint, createSecretLintConfig } from '../utils/secretLintUtils.js';
 import { logger } from '../utils/logger.js';
@@ -17,6 +18,8 @@ export interface Dependencies {
   createIgnoreFilter: typeof defaultCreateIgnoreFilter;
   processFile: typeof defaultProcessFile;
   generateOutput: typeof defaultGenerateOutput;
+  getAllIncludePatterns: typeof getAllIncludePatterns;
+  createIncludeFilter: typeof createIncludeFilter;
 }
 
 export interface PackResult {
@@ -39,14 +42,20 @@ export async function pack(
     createIgnoreFilter: defaultCreateIgnoreFilter,
     processFile: defaultProcessFile,
     generateOutput: defaultGenerateOutput,
+    getAllIncludePatterns: getAllIncludePatterns,
+    createIncludeFilter: createIncludeFilter, 
   },
 ): Promise<PackResult> {
   // Get ignore patterns
   const ignorePatterns = await deps.getAllIgnorePatterns(rootDir, config);
   const ignoreFilter = deps.createIgnoreFilter(ignorePatterns);
 
+  // Get include patterns
+  const includePatterns = await deps.getAllIncludePatterns(rootDir, config);
+  const includeFilter = deps.createIncludeFilter(includePatterns);
+
   // Get all file paths in the directory
-  const filePaths = await getFilePaths(rootDir, '', ignoreFilter);
+  const filePaths = await getFilePaths(rootDir, '', ignoreFilter, includeFilter, includePatterns);
 
   // Perform security check
   const suspiciousFilesResults = await performSecurityCheck(filePaths, rootDir);
@@ -71,24 +80,36 @@ export async function pack(
   };
 }
 
-async function getFilePaths(dir: string, relativePath: string, ignoreFilter: IgnoreFilter): Promise<string[]> {
+async function getFilePaths(
+  dir: string,
+  relativePath: string,
+  ignoreFilter: IgnoreFilter,
+  includeFilter: IncludeFilter,
+  includePatterns: string[],
+): Promise<string[]> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const filePaths: string[] = [];
 
   for (const entry of entries) {
     const entryRelativePath = path.join(relativePath, entry.name);
 
-    if (!ignoreFilter(entryRelativePath)) {
-      logger.trace(`Ignoring file: ${entryRelativePath}`);
-      continue;
-    }
-
     if (entry.isDirectory()) {
-      const subDirPaths = await getFilePaths(path.join(dir, entry.name), entryRelativePath, ignoreFilter);
+      const subDirPaths = await getFilePaths(path.join(dir, entry.name), entryRelativePath, ignoreFilter, includeFilter, includePatterns);
       filePaths.push(...subDirPaths);
     } else {
-      logger.trace(`Adding file: ${entryRelativePath}`);
-      filePaths.push(entryRelativePath);
+      const isIgnored = ignoreFilter(entryRelativePath);
+      if (isIgnored) {
+        logger.trace(`Ignoring file: ${entryRelativePath}`);
+        continue;
+      }
+
+      const isIncluded = includePatterns.length === 0 || includePatterns.includes(entryRelativePath) || includeFilter(entryRelativePath);
+      if (isIncluded) {
+        logger.trace(`Including file: ${entryRelativePath}`);
+        filePaths.push(entryRelativePath);
+      } else {
+        logger.trace(`Ignoring file (does not match include filter): ${entryRelativePath}`);
+      }
     }
   }
 
